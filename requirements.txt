@@ -7,6 +7,6 @@ openai==1.50.2
 python-dotenv==1.0.1
 reportlab==4.2.2
 pytrends==4.9.2
-pyjwt==2.9.0
+python-jose==3.3.0
 passlib[bcrypt]==1.7.4
 sqlalchemy==2.0.35
