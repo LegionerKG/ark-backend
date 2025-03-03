@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+pandas==2.2.3
+matplotlib==3.9.2
+scikit-learn==1.5.2
+openai==1.50.2
+python-dotenv==1.0.1
+reportlab==4.2.2
+pytrends==4.9.2
+pyjwt==2.9.0
+passlib[bcrypt]==1.7.4
+sqlalchemy==2.0.35
