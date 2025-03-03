@@ -360,11 +360,11 @@ async def analyze_file(
             f"Profit: {profit}, Profit Margin: {profit_margin:.2f}%, Breakeven Point: {breakeven_point:.2f}. "
             f"Monthly Trends: {monthly_trends.to_dict('records')}. Provide actionable business advice."
         )
-     response = openai.ChatCompletion.create(
-    model="gpt-3.5-turbo",
-    messages=[{"role": "user", "content": prompt}],
-    max_tokens=500
-)
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500
+        )
 
         ai_advice = response.choices[0].message.content.strip()
 
