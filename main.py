@@ -38,25 +38,24 @@ logger = logging.getLogger(__name__)
 # Загрузка переменных окружения
 load_dotenv()
 
+# Инициализация FastAPI
 app = FastAPI(
     title="ARK Backend",
     description="API для анализа бизнес-данных с авторизацией",
     version="1.0.0"
 )
 
-# Добавляем CORS для работы с frontend
-from fastapi.middleware.cors import CORSMiddleware
-
+# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000","https://ark-frontend.onrender.com"],  # Разрешаем фронтенд-домен
+    allow_origins=["http://localhost:3000", "https://ark-frontend.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Настройки JWT
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")  # Замените в Render
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -126,16 +125,20 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         headers={"WWW-Authenticate": "Bearer"},
     )
     if not token:
+        logger.debug("No token provided")
         raise credentials_exception
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
+            logger.debug("No username in token payload")
             raise credentials_exception
-    except JWTError:
+    except JWTError as e:
+        logger.debug(f"JWT error: {str(e)}")
         raise credentials_exception
     user = db.query(UserDB).filter(UserDB.username == username).first()
     if user is None:
+        logger.debug(f"User {username} not found in database")
         raise credentials_exception
     return user
 
@@ -144,8 +147,7 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     logger.error("OpenAI API key not configured")
     raise HTTPException(status_code=500, detail="OpenAI API key not configured")
-import openai
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=openai_api_key)
 pytrends = TrendReq(hl='en-US', tz=360)
 
 @app.get("/")
@@ -189,7 +191,7 @@ async def login_for_access_token(response: Response, form_data: OAuth2PasswordRe
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=True,  # Установите False для localhost, True для продакшена
+        secure=True,  # True для продакшена на Render (HTTPS)
         samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60
     )
@@ -232,7 +234,6 @@ async def upload_file(file: UploadFile = File(...), current_user: UserDB = Depen
             "file_token": tmp_path,
             "message": "Please specify date, revenue, and expenses columns, or set 'auto' to true"
         })
-
     except Exception as e:
         logger.error(f"Error processing file {file.filename}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
@@ -259,7 +260,6 @@ async def analyze_file(
             df = pd.read_excel(file_token)
 
         if auto:
-            # Улучшенная автоинтерпретация
             date_candidates = [
                 col for col in df.columns
                 if pd.to_datetime(df[col], errors='coerce').notna().sum() > len(df) * 0.8
@@ -362,12 +362,11 @@ async def analyze_file(
             f"Profit: {profit}, Profit Margin: {profit_margin:.2f}%, Breakeven Point: {breakeven_point:.2f}. "
             f"Monthly Trends: {monthly_trends.to_dict('records')}. Provide actionable business advice."
         )
-        response = openai.ChatCompletion.create(
+        response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=500
         )
-
         ai_advice = response.choices[0].message.content.strip()
 
         pytrends.build_payload(kw_list=['sales'], timeframe='today 3-m', geo='US')
@@ -395,7 +394,6 @@ async def analyze_file(
             "market_trend": float(market_trend),
             "interpreted_columns": {"date": date_col, "revenue": revenue_col, "expenses": expenses_col}
         })
-
     except Exception as e:
         logger.error(f"Error analyzing file {file_token}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error analyzing file: {str(e)}")
@@ -439,7 +437,6 @@ async def export_pdf(file_token: str = Form(...), current_user: UserDB = Depends
         os.remove(file_token)
         logger.info(f"PDF exported successfully for user {current_user.username}")
         return FileResponse(tmp.name, filename="ark_report.pdf", media_type="application/pdf")
-
     except Exception as e:
         logger.error(f"Error generating PDF for {file_token}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating PDF: {str(e)}")
