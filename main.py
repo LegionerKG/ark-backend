@@ -142,7 +142,8 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     logger.error("OpenAI API key not configured")
     raise HTTPException(status_code=500, detail="OpenAI API key not configured")
-openai_client = OpenAI(api_key=openai_api_key)
+import openai
+openai.api_key = os.getenv("OPENAI_API_KEY")
 pytrends = TrendReq(hl='en-US', tz=360)
 
 @app.get("/")
@@ -359,11 +360,12 @@ async def analyze_file(
             f"Profit: {profit}, Profit Margin: {profit_margin:.2f}%, Breakeven Point: {breakeven_point:.2f}. "
             f"Monthly Trends: {monthly_trends.to_dict('records')}. Provide actionable business advice."
         )
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150
-        )
+     response = openai.ChatCompletion.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": prompt}],
+    max_tokens=500
+)
+
         ai_advice = response.choices[0].message.content.strip()
 
         pytrends.build_payload(kw_list=['sales'], timeframe='today 3-m', geo='US')
