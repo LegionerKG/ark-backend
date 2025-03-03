@@ -45,9 +45,11 @@ app = FastAPI(
 )
 
 # Добавляем CORS для работы с frontend
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://ark-frontend.onrender.com"],  # Укажите ваш frontend URL после деплоя
+    allow_origins=["https://ark-frontend.onrender.com"],  # Разрешаем фронтенд-домен
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
