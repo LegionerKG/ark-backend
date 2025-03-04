@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import io
 import base64
 import requests
+import json  # Добавлен импорт json
 from typing import Optional
 import os
 
@@ -169,9 +170,8 @@ async def get_insights():
     try:
         data_summary = uploaded_data.describe().to_string()
         metrics_response = await get_metrics()  # Получаем JSONResponse
-        metrics = metrics_response.body  # Извлекаем тело ответа (байты)
-        metrics_dict = json.loads(metrics.decode('utf-8'))  # Декодируем в словарь
-        metrics_str = "\n".join([f"{k}: {v}" for k, v in metrics_dict.items()])
+        metrics = json.loads(metrics_response.body.decode('utf-8'))  # Декодируем в словарь
+        metrics_str = "\n".join([f"{k}: {v}" for k, v in metrics.items()])
         prompt = (
             f"Analyze the following business data summary and metrics:\n\n"
             f"Data Summary:\n{data_summary}\n\n"
@@ -207,5 +207,4 @@ async def get_insights():
 
 if __name__ == "__main__":
     import uvicorn
-    import json  # Добавляем импорт json
     uvicorn.run(app, host="0.0.0.0", port=8000)
