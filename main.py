@@ -20,7 +20,7 @@ column_mapping = {
     "discount": None
 }
 
-# Настройка OpenAI API (замени на свой ключ)
+# Настройка OpenAI API
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-openai-api-key-here")
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
@@ -166,15 +166,20 @@ async def get_insights():
         raise HTTPException(status_code=400, detail="No data uploaded yet.")
     
     # Подготовка данных для OpenAI
-    data_summary = uploaded_data.describe().to_string()
-    metrics = await get_metrics()
-    metrics_str = "\n".join([f"{k}: {v}" for k, v in metrics.content.items()])
-    prompt = (
-        f"Analyze the following business data summary and metrics:\n\n"
-        f"Data Summary:\n{data_summary}\n\n"
-        f"Metrics:\n{metrics_str}\n\n"
-        f"Provide detailed insights, identify anomalies, key trends, and actionable recommendations."
-    )
+    try:
+        data_summary = uploaded_data.describe().to_string()
+        metrics_response = await get_metrics()  # Получаем JSONResponse
+        metrics = metrics_response.body  # Извлекаем тело ответа (байты)
+        metrics_dict = json.loads(metrics.decode('utf-8'))  # Декодируем в словарь
+        metrics_str = "\n".join([f"{k}: {v}" for k, v in metrics_dict.items()])
+        prompt = (
+            f"Analyze the following business data summary and metrics:\n\n"
+            f"Data Summary:\n{data_summary}\n\n"
+            f"Metrics:\n{metrics_str}\n\n"
+            f"Provide detailed insights, identify anomalies, key trends, and actionable recommendations."
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error preparing data for AI: {str(e)}")
     
     # Запрос к OpenAI API
     headers = {
@@ -182,7 +187,7 @@ async def get_insights():
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "gpt-4o-mini",  # Можно заменить на "gpt-4" если есть доступ
+        "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 1000,
         "temperature": 0.7
@@ -192,11 +197,15 @@ async def get_insights():
         response = requests.post(OPENAI_API_URL, json=payload, headers=headers)
         response.raise_for_status()
         ai_response = response.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error querying OpenAI: {str(e)}")
+    except requests.exceptions.RequestException as e:
+        error_detail = f"Error querying OpenAI: {str(e)}"
+        if hasattr(e.response, "text"):
+            error_detail += f" - {e.response.text}"
+        raise HTTPException(status_code=500, detail=error_detail)
     
     return JSONResponse(content={"insights": ai_response})
 
 if __name__ == "__main__":
     import uvicorn
+    import json  # Добавляем импорт json
     uvicorn.run(app, host="0.0.0.0", port=8000)
