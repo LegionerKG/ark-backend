@@ -56,6 +56,40 @@ async def get_chart(column: str = "sales"):
     
     return JSONResponse(content={"image": f"data:image/png;base64,{img_base64}"})
 
+@app.get("/metrics")
+async def get_metrics():
+    """Расчёт финансовых метрик и трендов"""
+    global uploaded_data
+    if uploaded_data is None:
+        raise HTTPException(status_code=400, detail="No data uploaded yet. Please upload a file first.")
+    
+    # Предполагаем, что данные содержат столбцы: 'revenue' (доходы), 'expenses' (расходы)
+    required_columns = ["revenue", "expenses"]
+    missing_columns = [col for col in required_columns if col not in uploaded_data.columns]
+    if missing_columns:
+        raise HTTPException(status_code=400, detail=f"Missing required columns: {missing_columns}")
+    
+    # Расчёт метрик
+    data = uploaded_data
+    total_revenue = data["revenue"].sum()
+    total_expenses = data["expenses"].sum()
+    profit = total_revenue - total_expenses
+    profitability = (profit / total_revenue * 100) if total_revenue > 0 else 0  # Рентабельность в %
+
+    # Анализ трендов (рост/спад доходов)
+    revenue_trend = data["revenue"].pct_change().mean() * 100  # Средний процентный рост/спад
+    
+    # Формируем результат
+    metrics = {
+        "total_revenue": total_revenue,
+        "total_expenses": total_expenses,
+        "profit": profit,
+        "profitability_percent": round(profitability, 2),
+        "revenue_trend_percent": round(revenue_trend, 2) if not pd.isna(revenue_trend) else 0
+    }
+    
+    return JSONResponse(content=metrics)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
