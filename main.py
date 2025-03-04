@@ -48,7 +48,7 @@ async def upload_file(
                     raise HTTPException(status_code=400, detail=f"Column '{value}' not found in data.")
             message = "Columns updated with user input."
         else:
-            # Автоматическое определение, если пользователь ничего не указал
+            # Автоматическое определение
             column_mapping = {key: None for key in column_mapping}
             for col in uploaded_data.columns:
                 if pd.api.types.is_datetime64_any_dtype(uploaded_data[col]) or "date" in col.lower():
@@ -63,7 +63,6 @@ async def upload_file(
                     elif "discount" in col.lower() or "%" in col:
                         column_mapping["discount"] = col
             
-            # Проверка результата
             unmapped = [key for key, value in column_mapping.items() if value is None]
             if unmapped:
                 message = (
@@ -77,8 +76,14 @@ async def upload_file(
         if column_mapping["date"]:
             uploaded_data[column_mapping["date"]] = pd.to_datetime(uploaded_data[column_mapping["date"]])
         
+        # Преобразование данных в JSON-сериализуемый формат
+        data_preview = uploaded_data.head().to_dict(orient="records")
+        for row in data_preview:
+            if column_mapping["date"] and isinstance(row[column_mapping["date"]], pd.Timestamp):
+                row[column_mapping["date"]] = row[column_mapping["date"]].isoformat()
+        
         return JSONResponse(content={
-            "data": uploaded_data.head().to_dict(orient="records"),
+            "data": data_preview,
             "mapping": column_mapping,
             "message": message
         })
@@ -143,7 +148,8 @@ async def get_metrics():
         monthly_revenue = data.groupby("Month")[column_mapping["revenue"]].sum()
         revenue_trend = monthly_revenue.pct_change().mean() * 100
         metrics["revenue_trend_percent"] = round(revenue_trend, 2) if not pd.isna(revenue_trend) else 0
-        metrics["monthly_revenue"] = monthly_revenue.to_dict()
+        # Преобразование Period в строку для JSON
+        metrics["monthly_revenue"] = {str(k): float(v) for k, v in monthly_revenue.to_dict().items()}
 
     if column_mapping["rating"]:
         metrics["average_rating"] = round(float(data[column_mapping["rating"]].mean()), 2)
