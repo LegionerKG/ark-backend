@@ -4,7 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import io
 import base64
+import requests
 from typing import Optional
+import os
 
 app = FastAPI(title="SmartBiz 2.0")
 
@@ -18,6 +20,10 @@ column_mapping = {
     "discount": None
 }
 
+# Настройка OpenAI API (замени на свой ключ)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-openai-api-key-here")
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+
 @app.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -27,10 +33,8 @@ async def upload_file(
     rating: Optional[str] = None,
     discount: Optional[str] = None
 ):
-    """Загрузка файла и автоматическое/ручное определение столбцов"""
     global uploaded_data, column_mapping
     try:
-        # Чтение файла
         if file.filename.endswith(".csv"):
             uploaded_data = pd.read_csv(file.file)
         elif file.filename.endswith((".xlsx", ".xls")):
@@ -38,7 +42,6 @@ async def upload_file(
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format. Use CSV or Excel.")
         
-        # Если пользователь указал столбцы, используем их
         user_mapping = {"revenue": revenue, "profit": profit, "date": date, "rating": rating, "discount": discount}
         if any(user_mapping.values()):
             for key, value in user_mapping.items():
@@ -48,7 +51,6 @@ async def upload_file(
                     raise HTTPException(status_code=400, detail=f"Column '{value}' not found in data.")
             message = "Columns updated with user input."
         else:
-            # Автоматическое определение
             column_mapping = {key: None for key in column_mapping}
             for col in uploaded_data.columns:
                 if pd.api.types.is_datetime64_any_dtype(uploaded_data[col]) or "date" in col.lower():
@@ -72,11 +74,9 @@ async def upload_file(
             else:
                 message = "Columns auto-detected successfully."
         
-        # Преобразование даты, если определена
         if column_mapping["date"]:
             uploaded_data[column_mapping["date"]] = pd.to_datetime(uploaded_data[column_mapping["date"]])
         
-        # Преобразование данных в JSON-сериализуемый формат
         data_preview = uploaded_data.head().to_dict(orient="records")
         for row in data_preview:
             if column_mapping["date"] and isinstance(row[column_mapping["date"]], pd.Timestamp):
@@ -92,10 +92,9 @@ async def upload_file(
 
 @app.get("/chart")
 async def get_chart(column: Optional[str] = None):
-    """Построение графика по указанному или автоматически определённому столбцу"""
     global uploaded_data, column_mapping
     if uploaded_data is None:
-        raise HTTPException(status_code=400, detail="No data uploaded yet. Please upload a file first.")
+        raise HTTPException(status_code=400, detail="No data uploaded yet.")
     
     col = column if column else column_mapping["revenue"]
     if not col or col not in uploaded_data.columns:
@@ -123,10 +122,9 @@ async def get_chart(column: Optional[str] = None):
 
 @app.get("/metrics")
 async def get_metrics():
-    """Расчёт метрик на основе определённых столбцов"""
     global uploaded_data, column_mapping
     if uploaded_data is None:
-        raise HTTPException(status_code=400, detail="No data uploaded yet. Please upload a file first.")
+        raise HTTPException(status_code=400, detail="No data uploaded yet.")
     
     data = uploaded_data
     metrics = {}
@@ -148,7 +146,6 @@ async def get_metrics():
         monthly_revenue = data.groupby("Month")[column_mapping["revenue"]].sum()
         revenue_trend = monthly_revenue.pct_change().mean() * 100
         metrics["revenue_trend_percent"] = round(revenue_trend, 2) if not pd.isna(revenue_trend) else 0
-        # Преобразование Period в строку для JSON
         metrics["monthly_revenue"] = {str(k): float(v) for k, v in monthly_revenue.to_dict().items()}
 
     if column_mapping["rating"]:
@@ -158,9 +155,47 @@ async def get_metrics():
         metrics["average_discount_percent"] = round(float(data[column_mapping["discount"]].mean()), 2)
 
     if not metrics:
-        raise HTTPException(status_code=400, detail="No relevant columns defined. Re-upload with column definitions.")
+        raise HTTPException(status_code=400, detail="No relevant columns defined.")
     
     return JSONResponse(content=metrics)
+
+@app.get("/insights")
+async def get_insights():
+    global uploaded_data, column_mapping
+    if uploaded_data is None:
+        raise HTTPException(status_code=400, detail="No data uploaded yet.")
+    
+    # Подготовка данных для OpenAI
+    data_summary = uploaded_data.describe().to_string()
+    metrics = await get_metrics()
+    metrics_str = "\n".join([f"{k}: {v}" for k, v in metrics.content.items()])
+    prompt = (
+        f"Analyze the following business data summary and metrics:\n\n"
+        f"Data Summary:\n{data_summary}\n\n"
+        f"Metrics:\n{metrics_str}\n\n"
+        f"Provide detailed insights, identify anomalies, key trends, and actionable recommendations."
+    )
+    
+    # Запрос к OpenAI API
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "gpt-4o-mini",  # Можно заменить на "gpt-4" если есть доступ
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1000,
+        "temperature": 0.7
+    }
+    
+    try:
+        response = requests.post(OPENAI_API_URL, json=payload, headers=headers)
+        response.raise_for_status()
+        ai_response = response.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error querying OpenAI: {str(e)}")
+    
+    return JSONResponse(content={"insights": ai_response})
 
 if __name__ == "__main__":
     import uvicorn
