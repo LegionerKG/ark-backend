@@ -5,13 +5,12 @@ import matplotlib.pyplot as plt
 import io
 import base64
 import requests
-import json  # Добавлен импорт json
+import json
 from typing import Optional
 import os
 
 app = FastAPI(title="SmartBiz 2.0")
 
-# Хранилище данных и маппинга столбцов
 uploaded_data = None
 column_mapping = {
     "revenue": None,
@@ -21,7 +20,6 @@ column_mapping = {
     "discount": None
 }
 
-# Настройка OpenAI API
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-openai-api-key-here")
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
@@ -68,10 +66,7 @@ async def upload_file(
             
             unmapped = [key for key, value in column_mapping.items() if value is None]
             if unmapped:
-                message = (
-                    f"Could not auto-detect: {unmapped}. Please re-upload with parameters like "
-                    f"'revenue=Sales', 'profit=Profit', etc., to specify columns."
-                )
+                message = f"Could not auto-detect: {unmapped}. Please re-upload with parameters."
             else:
                 message = "Columns auto-detected successfully."
         
@@ -129,7 +124,6 @@ async def get_metrics():
     
     data = uploaded_data
     metrics = {}
-
     if column_mapping["revenue"]:
         revenue_col = column_mapping["revenue"]
         metrics["total_revenue"] = float(data[revenue_col].sum())
@@ -166,44 +160,55 @@ async def get_insights():
     if uploaded_data is None:
         raise HTTPException(status_code=400, detail="No data uploaded yet.")
     
-    # Подготовка данных для OpenAI
     try:
+        # Базовый анализ для ИИ
         data_summary = uploaded_data.describe().to_string()
-        metrics_response = await get_metrics()  # Получаем JSONResponse
-        metrics = json.loads(metrics_response.body.decode('utf-8'))  # Декодируем в словарь
+        metrics_response = await get_metrics()
+        metrics = json.loads(metrics_response.body.decode('utf-8'))
         metrics_str = "\n".join([f"{k}: {v}" for k, v in metrics.items()])
+        
+        # График трендов (если есть даты и продажи)
+        chart_base64 = None
+        if column_mapping["date"] and column_mapping["revenue"]:
+            plt.figure(figsize=(10, 6))
+            monthly_data = uploaded_data.groupby(uploaded_data[column_mapping["date"]].dt.to_period("M"))[column_mapping["revenue"]].sum()
+            monthly_data.plot(kind="line", marker="o")
+            plt.title("Revenue Trend by Month")
+            plt.xlabel("Month")
+            plt.ylabel("Revenue")
+            plt.grid(True)
+            plt.xticks(rotation=45)
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", bbox_inches="tight")
+            buf.seek(0)
+            chart_base64 = base64.b64encode(buf.read()).decode("utf-8")
+            plt.close()
+
+        # Запрос к OpenAI
         prompt = (
-            f"Analyze the following business data summary and metrics:\n\n"
+            f"Analyze this business data summary and metrics:\n\n"
             f"Data Summary:\n{data_summary}\n\n"
             f"Metrics:\n{metrics_str}\n\n"
             f"Provide detailed insights, identify anomalies, key trends, and actionable recommendations."
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error preparing data for AI: {str(e)}")
-    
-    # Запрос к OpenAI API
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1000,
-        "temperature": 0.7
-    }
-    
-    try:
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1000,
+            "temperature": 0.5
+        }
         response = requests.post(OPENAI_API_URL, json=payload, headers=headers)
         response.raise_for_status()
         ai_response = response.json()["choices"][0]["message"]["content"]
-    except requests.exceptions.RequestException as e:
-        error_detail = f"Error querying OpenAI: {str(e)}"
-        if hasattr(e.response, "text"):
-            error_detail += f" - {e.response.text}"
-        raise HTTPException(status_code=500, detail=error_detail)
-    
-    return JSONResponse(content={"insights": ai_response})
+        
+        # Формируем ответ
+        result = {"insights": ai_response}
+        if chart_base64:
+            result["trend_chart"] = f"data:image/png;base64,{chart_base64}"
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error preparing data for AI: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
