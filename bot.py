@@ -1,24 +1,31 @@
 import telebot
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import json
 import os
 import io
 import textwrap
 import pytesseract
 import shutil
-
+import logging
 from telebot import types
+from telegram.error import TimedOut, Conflict
 
+# Настройка логирования
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Получение токена из переменной окружения
 TOKEN = os.getenv('TELEGRAM_TOKEN')
+if not TOKEN:
+    logger.error("TELEGRAM_TOKEN не задан в переменных окружения!")
+    raise ValueError("Необходимо указать TELEGRAM_TOKEN в переменных окружения")
+
 bot = telebot.TeleBot(TOKEN)
 
 # Хранение временных данных пользователей
 user_states = {}
-# Дополнительный словарь не всегда нужен,
-# поскольку шаблоны сохраняются в файл.
-# user_templates = {}
 
 # Директория для сохранения JSON-файлов и временных изображений
 TEMPLATES_DIR = "user_templates"
@@ -65,7 +72,6 @@ def process_template_image(message):
         return
         
     try:
-        # Сохраняем изображение во временный файл
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         temp_path = os.path.join(TEMPLATES_DIR, f"{user_id}_temp.jpg")
@@ -73,11 +79,9 @@ def process_template_image(message):
         with open(temp_path, 'wb') as f:
             f.write(downloaded_file)
         
-        # Анализируем шаблон
         template = analyze_template(temp_path)
         template['name'] = user_states[user_id]['template_name']
         
-        # Сохраняем шаблон в JSON
         user_dir = os.path.join(TEMPLATES_DIR, str(user_id))
         os.makedirs(user_dir, exist_ok=True)
         template_path = os.path.join(user_dir, f"{template['name']}.json")
@@ -85,7 +89,6 @@ def process_template_image(message):
         with open(template_path, 'w', encoding='utf-8') as f:
             json.dump(template, f, ensure_ascii=False, indent=2)
             
-        # Генерируем предпросмотр
         preview = generate_preview(template, temp_path)
         markup = types.InlineKeyboardMarkup()
         markup.add(
@@ -97,36 +100,25 @@ def process_template_image(message):
         os.remove(temp_path)
         
     except Exception as e:
+        logger.error(f"Ошибка в process_template_image: {str(e)}")
         bot.reply_to(message, f"Ошибка: {str(e)}")
-        # при ошибке удаляем временный файл, чтобы не копить мусор
         temp_path = os.path.join(TEMPLATES_DIR, f"{user_id}_temp.jpg")
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
 def analyze_template(image_path):
-    """
-    Улучшенный анализ шаблона:
-    1) Если tesseract установлен, пытается найти текстовые зоны через OCR.
-    2) В противном случае – fallback: threshold + contours.
-    3) Анализируем логотип.
-    4) Анализируем цветовую схему (dominant color).
-    """
-    # Загружаем в OpenCV
+    """Анализ шаблона: текст, логотип, цвета."""
     image = cv2.imread(image_path)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
     if TESSERACT_AVAILABLE:
         text_areas = find_text_zones_ocr(image)
         if not text_areas:
-            # OCR не нашёл или не смог. fallback
             text_areas = find_text_zones_contours(gray, image)
     else:
         text_areas = find_text_zones_contours(gray, image)
     
-    # Логотип
     logo_coords = find_logo(gray, image.shape)
-    
-    # Цветовая схема
     background_color = [int(c) for c in image[10, 10]]
     color_scheme = get_color_scheme(image)
     
@@ -138,32 +130,11 @@ def analyze_template(image_path):
     }
 
 def find_text_zones_ocr(bgr_image):
-    """
-    Используем Tesseract, чтобы найти фрагменты текста.
-    Возвращаем список словарей вида:
-    [
-      {
-        'position': (x, y, w, h),
-        'color': [r, g, b],
-        'font_size': int,
-        'font_family': 'arial.ttf'
-      }, ...
-    ]
-    Примечание: Tesseract может находить много маленьких боксов.
-    Чтобы их объединять в более крупные блоки, можно дописать логику группировки.
-    Для упрощения здесь возвращаем bounding box для каждого «непустого» текста.
-    """
-    import pytesseract
-    from pytesseract import Output
-    
-    # OCR работает лучше в RGB
+    """Поиск текстовых зон через Tesseract OCR."""
     rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-    
-    data = pytesseract.image_to_data(rgb_image, output_type=Output.DICT)
+    data = pytesseract.image_to_data(rgb_image, output_type=pytesseract.Output.DICT)
     n_boxes = len(data['level'])
     result = []
-    
-    # Порог площади, чтобы отсекать микроскопические фрагменты
     MIN_AREA = 2000
     
     for i in range(n_boxes):
@@ -176,7 +147,6 @@ def find_text_zones_ocr(bgr_image):
         if area < MIN_AREA:
             continue
         
-        # Цвет примерно берём в центре
         cx, cy = x + w//2, y + h//2
         if cx < bgr_image.shape[1] and cy < bgr_image.shape[0]:
             color_bgr = bgr_image[cy, cx]
@@ -184,7 +154,6 @@ def find_text_zones_ocr(bgr_image):
         else:
             color = [255, 255, 255]
         
-        # Эвристически считаем, что высота определяет шрифт
         font_size = int(h * 0.8)
         if font_size < 10:
             font_size = 10
@@ -199,18 +168,14 @@ def find_text_zones_ocr(bgr_image):
     return result
 
 def find_text_zones_contours(gray_image, bgr_image):
-    """
-    Fallback для случая, если OCR недоступен или дал нулевой результат.
-    Ищем контуры на бинаризованном изображении. Для каждого крупного контура
-    считаем это потенциальной текстовой зоной.
-    """
+    """Fallback: поиск текстовых зон через контуры."""
     _, thresh = cv2.threshold(gray_image, 200, 255, cv2.THRESH_BINARY_INV)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     text_areas = []
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
-        if w * h > 5000:  # Минимальный размер области
+        if w * h > 5000:
             mask = np.zeros_like(gray_image)
             cv2.drawContours(mask, [cnt], -1, 255, -1)
             mean_color = cv2.mean(bgr_image, mask=mask)[:3]
@@ -228,12 +193,7 @@ def find_text_zones_contours(gray_image, bgr_image):
     return text_areas
 
 def find_logo(gray_image, img_shape):
-    """
-    Улучшенный поиск логотипа:
-    1) Canny для ребёр
-    2) Находим самый большой контур, НЕ превышающий 40% площади всего изображения
-    3) Если нет подходящего, возвращаем дефолт (50,50,200,100)
-    """
+    """Поиск логотипа через контуры."""
     edges = cv2.Canny(gray_image, 50, 150)
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -241,11 +201,10 @@ def find_logo(gray_image, img_shape):
     best_cnt = None
     img_h, img_w = img_shape[:2]
     total_area = img_w * img_h
-    AREA_THRESHOLD = 0.4 * total_area  # 40% от всей картинки
+    AREA_THRESHOLD = 0.4 * total_area
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        # Игнорируем совсем гигантские области (фон)
         if area > max_area and area < AREA_THRESHOLD:
             max_area = area
             best_cnt = cnt
@@ -253,31 +212,20 @@ def find_logo(gray_image, img_shape):
     if best_cnt is not None:
         x, y, w, h = cv2.boundingRect(best_cnt)
         return (x, y, w, h)
-    else:
-        return (50, 50, 200, 100)  # Значение по умолчанию
+    return (50, 50, 200, 100)
 
 def get_color_scheme(image):
-    """
-    Анализ цветовой схемы (k=5).
-    Возвращаем доминирующий цвет как [R,G,B].
-    Можно дополнительно вернуть весь список кластеров/палитру.
-    """
+    """Анализ цветовой схемы через k-means."""
     pixels = np.float32(image.reshape(-1, 3))
     n_colors = 5
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 200, 0.1)
-    
     _, labels, palette = cv2.kmeans(pixels, n_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
     _, counts = np.unique(labels, return_counts=True)
-    
     dominant = palette[np.argmax(counts)]
     return [int(c) for c in dominant]
 
 def generate_preview(template, image_path):
-    """
-    Генерация предпросмотра шаблона:
-    - рисуем поверх текста "Пример текста" в зонах,
-    - отображаем рамку логотипа.
-    """
+    """Генерация предпросмотра шаблона."""
     img = Image.open(image_path).convert("RGBA")
     draw = ImageDraw.Draw(img)
     
@@ -293,19 +241,18 @@ def generate_preview(template, image_path):
         
         x, y, w, h = area['position']
         sample_text = "Пример текста"
-        # Пытаемся адаптировать текст под ширину w
         lines = wrap_text(sample_text, font, w)
         
-        # Начальная позиция: вертикально по центру области
-        total_height = sum(font.getsize(line)[1] for line in lines)
-        current_y = y + (h - total_height)//2
+        total_height = sum(font.getbbox(line)[3] - font.getbbox(line)[1] for line in lines)
+        current_y = y + (h - total_height) // 2
         for line in lines:
-            line_width, line_height = font.getsize(line)
-            line_x = x + (w - line_width)//2
+            bbox = font.getbbox(line)
+            line_width = bbox[2] - bbox[0]
+            line_height = bbox[3] - bbox[1]
+            line_x = x + (w - line_width) // 2
             draw.text((line_x, current_y), line, font=font, fill=text_color)
             current_y += line_height
     
-    # Рамка для логотипа
     if 'logo_position' in template:
         x, y, w, h = template['logo_position']
         draw.rectangle([x, y, x+w, y+h], outline=(255, 0, 0), width=3)
@@ -316,33 +263,29 @@ def generate_preview(template, image_path):
     return preview
 
 def wrap_text(text, font, max_width):
-    """
-    Примитивная функция переноса слов, чтобы не вылезали за max_width.
-    """
+    """Перенос текста по ширине."""
     words = text.split()
     lines = []
     current_line = []
     
     for word in words:
         test_line = current_line + [word]
-        w, _ = font.getsize(' '.join(test_line))
+        test_text = ' '.join(test_line)
+        bbox = font.getbbox(test_text)
+        w = bbox[2] - bbox[0]
         if w <= max_width:
             current_line = test_line
         else:
-            # перенос
             lines.append(' '.join(current_line))
             current_line = [word]
     
-    # добавляем последнюю строку
     if current_line:
         lines.append(' '.join(current_line))
     return lines
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    """
-    Обработка подтверждения/отмены шаблона.
-    """
+    """Обработка подтверждения/отмены шаблона."""
     user_id = call.from_user.id
     action, template_name = call.data.split('_', 1)
     
@@ -350,7 +293,6 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "Шаблон сохранен!")
         bot.send_message(user_id, f"Шаблон '{template_name}' успешно сохранен!")
     elif action == 'cancel':
-        # Удаляем шаблон
         template_path = os.path.join(TEMPLATES_DIR, str(user_id), f"{template_name}.json")
         if os.path.exists(template_path):
             os.remove(template_path)
@@ -359,9 +301,7 @@ def callback_handler(call):
 
 @bot.message_handler(commands=['create'])
 def create_post(message):
-    """
-    Позволяем выбрать один из сохранённых шаблонов и создать пост.
-    """
+    """Выбор шаблона для создания поста."""
     user_id = message.from_user.id
     user_dir = os.path.join(TEMPLATES_DIR, str(user_id))
     
@@ -369,13 +309,8 @@ def create_post(message):
         bot.reply_to(message, "У вас нет сохраненных шаблонов. Создайте их через /learn.")
         return
     
-    # Создаем клавиатуру с шаблонами
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    templates = []
-    # Сканируем директорию user_dir, собираем имена файлов .json
-    for entry in os.scandir(user_dir):
-        if entry.is_file() and entry.name.endswith('.json'):
-            templates.append(os.path.splitext(entry.name)[0])
+    templates = [os.path.splitext(entry.name)[0] for entry in os.scandir(user_dir) if entry.is_file() and entry.name.endswith('.json')]
     
     if not templates:
         bot.reply_to(message, "Нет файлов-шаблонов. Создайте через /learn.")
@@ -390,7 +325,7 @@ def create_post(message):
     bot.register_next_step_handler(message, process_template_selection)
 
 def process_template_selection(message):
-    """Пользователь выбирает шаблон из списка, затем присылает фото + подпись."""
+    """Обработка выбора шаблона и запрос фото."""
     user_id = message.from_user.id
     template_name = message.text
     
@@ -411,10 +346,7 @@ def process_template_selection(message):
     bot.register_next_step_handler(message, generate_final_post)
 
 def generate_final_post(message):
-    """
-    Получаем новое изображение + подпись (caption), заполняем по шаблону.
-    Выводим результат обратно.
-    """
+    """Генерация финального поста с текстом и логотипом."""
     user_id = message.from_user.id
     template = user_states[user_id].get('current_template')
     
@@ -432,7 +364,6 @@ def generate_final_post(message):
         downloaded_file = bot.download_file(file_info.file_path)
         img = Image.open(io.BytesIO(downloaded_file)).convert("RGBA")
         
-        # Накладываем текстовые блоки из template['text_areas']
         draw = ImageDraw.Draw(img)
         
         for area in template.get('text_areas', []):
@@ -441,33 +372,27 @@ def generate_final_post(message):
             font_path = area.get('font_family', "arial.ttf")
             font_size = area.get('font_size', 24)
             
-            # Автоматически уменьшаем шрифт, чтобы текст влез.
             final_font = fit_text_in_area(text, font_path, font_size, w, h)
-            
             lines = wrap_text_multi(text, final_font, w, h)
             
-            # Подсчитаем общую высоту
-            total_height = sum(final_font.getsize(line)[1] for line in lines)
-            current_y = y + (h - total_height)//2
+            total_height = sum(final_font.getbbox(line)[3] - final_font.getbbox(line)[1] for line in lines)
+            current_y = y + (h - total_height) // 2
             
             for line in lines:
-                line_width, line_height = final_font.getsize(line)
-                line_x = x + (w - line_width)//2
+                bbox = final_font.getbbox(line)
+                line_width = bbox[2] - bbox[0]
+                line_height = bbox[3] - bbox[1]
+                line_x = x + (w - line_width) // 2
                 draw.text((line_x, current_y), line, font=final_font, fill=text_color)
                 current_y += line_height
         
-        # Добавляем логотип
         if 'logo_position' in template:
             lx, ly, lw, lh = template['logo_position']
             if os.path.exists("default_logo.png"):
                 logo = Image.open("default_logo.png").convert("RGBA")
-                # При необходимости уменьшим логотип под размер (lw, lh)
-                logo.thumbnail((lw, lh), Image.ANTIALIAS)
-                # Вставляем логотип с учётом прозрачности
+                logo.thumbnail((lw, lh), Image.Resampling.LANCZOS)
                 img.paste(logo, (lx, ly), logo)
-            # Иначе можно вставить заглушку или пропустить
         
-        # Сохраняем результат в буфер
         result = io.BytesIO()
         img.save(result, format='PNG')
         result.seek(0)
@@ -475,13 +400,11 @@ def generate_final_post(message):
         bot.send_photo(user_id, result, "Ваш пост готов!")
         
     except Exception as e:
-        bot.reply_to(message, f"Ошибка генерации: {str(e)}")
+        logger.error(f"Ошибка в generate_final_post: {str(e)}")
+        bot.reply_to(message, f"Ошибка: {str(e)}")
 
 def fit_text_in_area(text, font_path, initial_size, max_width, max_height):
-    """
-    Итеративно уменьшаем шрифт, пока не гарантируем, что текст влезет (по высоте).
-    Предполагаем, что ужимаем строки в wrap_text_multi.
-    """
+    """Подбор размера шрифта для области."""
     size = initial_size
     while size > 10:
         try:
@@ -490,8 +413,7 @@ def fit_text_in_area(text, font_path, initial_size, max_width, max_height):
             font = ImageFont.load_default()
         
         lines = wrap_text_multi(text, font, max_width, max_height)
-        # Считаем общую высоту
-        total_height = sum(font.getsize(line)[1] for line in lines)
+        total_height = sum(font.getbbox(line)[3] - font.getbbox(line)[1] for line in lines)
         
         if total_height <= max_height:
             return font
@@ -501,29 +423,43 @@ def fit_text_in_area(text, font_path, initial_size, max_width, max_height):
     return ImageFont.load_default()
 
 def wrap_text_multi(text, font, max_width, max_height):
-    """
-    Перенос слов, который прерывает цикл, если текст вышел за пределы max_height.
-    """
+    """Перенос текста с учётом ширины и высоты."""
     words = text.split()
     lines = []
     current_line = []
     
     for word in words:
         test_line = current_line + [word]
-        w, h = font.getsize(' '.join(test_line))
+        test_text = ' '.join(test_line)
+        bbox = font.getbbox(test_text)
+        w = bbox[2] - bbox[0]
         if w <= max_width:
             current_line = test_line
         else:
-            # перенос строки
             lines.append(' '.join(current_line))
             current_line = [word]
     
     if current_line:
         lines.append(' '.join(current_line))
     
-    # Дополнительно можно обрезать, если строк слишком много (чтобы не вылезть за max_height)
-    # Однако здесь мы просто вернём все строки, а выше при fit_text_in_area() уменьшаем шрифт.
     return lines
 
+def polling_with_error_handling():
+    """Запуск бота с обработкой ошибок."""
+    try:
+        logger.info("Starting bot with polling...")
+        bot.polling(none_stop=True, timeout=15)
+    except TimedOut as e:
+        logger.warning(f"Timed out error: {str(e)}. Retrying...")
+        polling_with_error_handling()
+    except Conflict as e:
+        logger.error(f"Conflict error: {str(e)}. Bot instance already running elsewhere. Exiting...")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}. Retrying in 5 seconds...")
+        import time
+        time.sleep(5)
+        polling_with_error_handling()
+
 if __name__ == "__main__":
-    bot.polling()
+    polling_with_error_handling()
