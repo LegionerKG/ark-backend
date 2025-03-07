@@ -5,6 +5,7 @@ from telegram import Update
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import pytesseract
+import telegram.error
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -106,19 +107,27 @@ def start(update: Update, context):
         "3. Отправьте фото и текст для создания поста"
     )
 
+def error_handler(update: Update, context):
+    logger.error(f"Произошла ошибка: {context.error}")
+    if isinstance(context.error, telegram.error.TimedOut):
+        logger.warning("Таймаут при запросе к Telegram API, продолжаем работу...")
+    elif isinstance(context.error, telegram.error.Conflict):
+        update.message.reply_text("Ошибка: бот уже запущен где-то ещё. Остановите другие экземпляры.")
+
 def main():
     token = os.getenv("TELEGRAM_TOKEN")
     if not token:
         logger.error("TELEGRAM_TOKEN не задан!")
         raise ValueError("TELEGRAM_TOKEN не задан в переменных окружения")
     logger.info("Starting bot with polling...")
-    updater = Updater(token, use_context=True)
+    updater = Updater(token, use_context=True, request_kwargs={'read_timeout': 10, 'connect_timeout': 10})
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("template", handle_template))
     dp.add_handler(MessageHandler(Filters.photo & ~Filters.caption, handle_logo))
     dp.add_handler(MessageHandler(Filters.photo & Filters.caption, handle_content))
-    updater.start_polling()
+    dp.add_error_handler(error_handler)
+    updater.start_polling(timeout=15)
     logger.info("Bot is running...")
     updater.idle()
 
