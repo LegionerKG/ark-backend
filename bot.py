@@ -10,7 +10,6 @@ import pytesseract
 import shutil
 import logging
 from telebot import types
-from telegram.error import TimedOut, Conflict
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -449,12 +448,18 @@ def polling_with_error_handling():
     try:
         logger.info("Starting bot with polling...")
         bot.polling(none_stop=True, timeout=15)
-    except TimedOut as e:
-        logger.warning(f"Timed out error: {str(e)}. Retrying...")
-        polling_with_error_handling()
-    except Conflict as e:
-        logger.error(f"Conflict error: {str(e)}. Bot instance already running elsewhere. Exiting...")
-        raise
+    except telebot.apihelper.ApiTelegramException as e:
+        if "Timed out" in str(e):
+            logger.warning(f"Timed out error: {str(e)}. Retrying...")
+            polling_with_error_handling()
+        elif "Conflict" in str(e):
+            logger.error(f"Conflict error: {str(e)}. Bot instance already running elsewhere. Exiting...")
+            raise
+        else:
+            logger.error(f"Unexpected Telegram API error: {str(e)}. Retrying in 5 seconds...")
+            import time
+            time.sleep(5)
+            polling_with_error_handling()
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}. Retrying in 5 seconds...")
         import time
