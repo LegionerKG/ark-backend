@@ -1,6 +1,4 @@
-fastapi
-uvicorn
-pandas
-matplotlib
-requests
-python-multipart
+python-telegram-bot==13.7
+pillow
+opencv-python
+pytesseract
