@@ -3,3 +3,7 @@ opencv-python==4.9.0.80
 numpy==1.26.4
 Pillow==10.2.0
 pytesseract==0.3.10
+easyocr==1.7.1  # Для более точного OCR
+torch==2.1.0  # Для моделей машинного обучения (YOLO)
+torchvision==0.16.0
+ultralytics==8.0.208  # Для YOLOv8
