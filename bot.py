@@ -2,10 +2,10 @@ import os
 import logging
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 from telegram import Update
+import telegram.error
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 import pytesseract
-import telegram.error
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,14 +54,27 @@ def create_post(template, photo_path, text, logo_path):
 
 def handle_template(update: Update, context):
     logger.info("Handling /template command")
-    if not update.message.photo:
-        update.message.reply_text("Отправьте фото с шаблоном вместе с /template!")
-        return
-    photo_file = update.message.photo[-1].get_file()
-    photo_path = f"template_{update.message.from_user.id}.jpg"
-    photo_file.download(photo_path)
-    template = analyze_template(photo_path)
     user_id = update.message.from_user.id
+    file_id = None
+    file_path = f"template_{user_id}.jpg"
+
+    # Проверяем, есть ли фото
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+        logger.info(f"Photo detected with file_id: {file_id}")
+    # Проверяем, есть ли документ (фото может быть отправлено как документ)
+    elif update.message.document and update.message.document.mime_type.startswith('image/'):
+        file_id = update.message.document.file_id
+        logger.info(f"Document detected with file_id: {file_id}")
+    else:
+        update.message.reply_text("Отправьте фото с шаблоном вместе с /template!")
+        logger.warning("No photo or document found in /template message")
+        return
+
+    # Скачиваем файл
+    file = context.bot.get_file(file_id)
+    file.download(file_path)
+    template = analyze_template(file_path)
     user_templates[user_id] = template
     update.message.reply_text("Шаблон сохранен! Теперь отправьте логотип, затем фото и текст.")
 
@@ -70,10 +83,20 @@ def handle_logo(update: Update, context):
     if user_id not in user_templates:
         update.message.reply_text("Сначала отправьте шаблон с /template!")
         return
-    photo_file = update.message.photo[-1].get_file()
-    logo_path = f"logo_{user_id}.png"
-    photo_file.download(logo_path)
-    user_logos[user_id] = logo_path
+    file_id = None
+    file_path = f"logo_{user_id}.png"
+
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    elif update.message.document and update.message.document.mime_type.startswith('image/'):
+        file_id = update.message.document.file_id
+    else:
+        update.message.reply_text("Отправьте изображение логотипа!")
+        return
+
+    file = context.bot.get_file(file_id)
+    file.download(file_path)
+    user_logos[user_id] = file_path
     update.message.reply_text("Логотип сохранен! Отправьте фото и текст для поста.")
 
 def handle_content(update: Update, context):
@@ -124,7 +147,7 @@ def main():
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("template", handle_template))
-    dp.add_handler(MessageHandler(Filters.photo & ~Filters.caption, handle_logo))
+    dp.add_handler(MessageHandler(Filters.photo & ~Filters.caption & ~Filters.command, handle_logo))
     dp.add_handler(MessageHandler(Filters.photo & Filters.caption, handle_content))
     dp.add_error_handler(error_handler)
     updater.start_polling(timeout=15)
