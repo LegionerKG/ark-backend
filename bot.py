@@ -5,11 +5,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 import json
 import os
 import io
-import textwrap
-import pytesseract
-import shutil
 import logging
 from telebot import types
+import easyocr
+from ultralytics import YOLO
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -30,8 +29,9 @@ user_states = {}
 TEMPLATES_DIR = "user_templates"
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
-# Проверяем, установлен ли Tesseract в системе (для OCR)
-TESSERACT_AVAILABLE = bool(shutil.which("tesseract"))
+# Инициализация модели YOLOv8 и EasyOCR
+model = YOLO('yolov8n.pt')  # Предобученная модель, замените на 'best.pt' после дообучения
+reader = easyocr.Reader(['en'])  # Инициализация EasyOCR для текста
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -84,10 +84,13 @@ def process_template_image(message):
         user_dir = os.path.join(TEMPLATES_DIR, str(user_id))
         os.makedirs(user_dir, exist_ok=True)
         template_path = os.path.join(user_dir, f"{template['name']}.json")
+        image_save_path = os.path.join(user_dir, f"{template['name']}.jpg")  # Сохраняем оригинал
         
         with open(template_path, 'w', encoding='utf-8') as f:
             json.dump(template, f, ensure_ascii=False, indent=2)
-            
+        with open(image_save_path, 'wb') as f:
+            f.write(downloaded_file)  # Сохраняем фото
+        
         preview = generate_preview(template, temp_path)
         markup = types.InlineKeyboardMarkup()
         markup.add(
@@ -106,50 +109,27 @@ def process_template_image(message):
             os.remove(temp_path)
 
 def analyze_template(image_path):
-    """Анализ шаблона: текст, логотип, цвета."""
+    """Анализ шаблона с использованием предобученной YOLOv8 и EasyOCR."""
+    # Загружаем изображение
     image = cv2.imread(image_path)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    img_pil = Image.open(image_path).convert("RGBA")
     
-    if TESSERACT_AVAILABLE:
-        text_areas = find_text_zones_ocr(image)
-        if not text_areas:
-            text_areas = find_text_zones_contours(gray, image)
-    else:
-        text_areas = find_text_zones_contours(gray, image)
-    
-    logo_coords = find_logo(gray, image.shape)
-    background_color = [int(c) for c in image[10, 10]]
-    color_scheme = get_color_scheme(image)
-    
-    return {
-        'text_areas': text_areas,
-        'logo_position': logo_coords,
-        'background_color': background_color,
-        'color_scheme': color_scheme
-    }
-
-def find_text_zones_ocr(bgr_image):
-    """Поиск текстовых зон через Tesseract OCR."""
-    rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-    data = pytesseract.image_to_data(rgb_image, output_type=pytesseract.Output.DICT)
-    n_boxes = len(data['level'])
-    result = []
-    MIN_AREA = 2000
-    
-    for i in range(n_boxes):
-        text_str = data['text'][i].strip()
-        if not text_str:
+    # Используем EasyOCR для детекции текста
+    ocr_results = reader.readtext(img_rgb)
+    text_areas = []
+    for (bbox, text, prob) in ocr_results:
+        if prob < 0.5:
             continue
+        (top_left, top_right, bottom_right, bottom_left) = bbox
+        x1, y1 = int(top_left[0]), int(top_left[1])
+        x2, y2 = int(bottom_right[0]), int(bottom_right[1])
+        w, h = x2 - x1, y2 - y1
         
-        x, y, w, h = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
-        area = w * h
-        if area < MIN_AREA:
-            continue
-        
-        cx, cy = x + w//2, y + h//2
-        if cx < bgr_image.shape[1] and cy < bgr_image.shape[0]:
-            color_bgr = bgr_image[cy, cx]
-            color = [int(color_bgr[2]), int(color_bgr[1]), int(color_bgr[0])]
+        # Определяем цвет текста
+        cx, cy = x1 + w//2, y1 + h//2
+        if cx < img_rgb.shape[1] and cy < img_rgb.shape[0]:
+            color = [int(img_rgb[cy, cx][0]), int(img_rgb[cy, cx][1]), int(img_rgb[cy, cx][2])]
         else:
             color = [255, 255, 255]
         
@@ -157,61 +137,56 @@ def find_text_zones_ocr(bgr_image):
         if font_size < 10:
             font_size = 10
         
-        result.append({
-            'position': (x, y, w, h),
+        # Проверяем яркость фона под текстом (нужна ли заливка)
+        region = np.array(img_pil.crop((x1, y1, x2, y2)).convert("L"))
+        brightness = np.mean(region)
+        needs_overlay = brightness > 128  # Если фон слишком яркий, добавляем затемнение
+        
+        text_area = {
+            'position': (x1, y1, w, h),
             'color': color,
             'font_size': font_size,
-            'font_family': 'arial.ttf'
-        })
+            'font_family': 'arial.ttf',
+            'needs_overlay': needs_overlay
+        }
+        text_areas.append(text_area)
     
-    return result
-
-def find_text_zones_contours(gray_image, bgr_image):
-    """Fallback: поиск текстовых зон через контуры."""
-    _, thresh = cv2.threshold(gray_image, 200, 255, cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Используем YOLOv8 для поиска логотипа (если модель дообучена)
+    logo_position = None
+    results = model(img_rgb)
+    for result in results:
+        boxes = result.boxes
+        for box in boxes:
+            label = result.names[int(box.cls)]
+            if label == 'logo':  # Предполагаем, что YOLO дообучена на класс "logo"
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                w, h = x2 - x1, y2 - y1
+                logo_position = (x1, y1, w, h)
+                break
     
-    text_areas = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        if w * h > 5000:
-            mask = np.zeros_like(gray_image)
-            cv2.drawContours(mask, [cnt], -1, 255, -1)
-            mean_color = cv2.mean(bgr_image, mask=mask)[:3]
-            color = [int(mean_color[2]), int(mean_color[1]), int(mean_color[0])]
-            font_size = int(h * 0.8)
-            if font_size < 10:
-                font_size = 10
-            
-            text_areas.append({
-                'position': (x, y, w, h),
-                'color': color,
-                'font_size': font_size,
-                'font_family': 'arial.ttf'
-            })
-    return text_areas
-
-def find_logo(gray_image, img_shape):
-    """Поиск логотипа через контуры."""
-    edges = cv2.Canny(gray_image, 50, 150)
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Если логотип не найден, задаём дефолтное положение
+    if not logo_position:
+        img_h, img_w = image.shape[:2]
+        logo_position = (int(img_w * 0.8), int(img_h * 0.8), 100, 100)
     
-    max_area = 0
-    best_cnt = None
-    img_h, img_w = img_shape[:2]
-    total_area = img_w * img_h
-    AREA_THRESHOLD = 0.4 * total_area
+    # Определяем зоны затемнения на основе яркости фона под текстом
+    overlay_areas = []
+    for area in text_areas:
+        if area['needs_overlay']:
+            x, y, w, h = area['position']
+            overlay_areas.append((x, y, w, h))
     
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area > max_area and area < AREA_THRESHOLD:
-            max_area = area
-            best_cnt = cnt
+    # Определяем цветовую схему
+    background_color = [int(c) for c in img_rgb[10, 10]]
+    color_scheme = get_color_scheme(image)
     
-    if best_cnt is not None:
-        x, y, w, h = cv2.boundingRect(best_cnt)
-        return (x, y, w, h)
-    return (50, 50, 200, 100)
+    return {
+        'text_areas': text_areas,
+        'logo_position': logo_position,
+        'overlay_areas': overlay_areas,
+        'background_color': background_color,
+        'color_scheme': color_scheme
+    }
 
 def get_color_scheme(image):
     """Анализ цветовой схемы через k-means."""
@@ -227,6 +202,15 @@ def generate_preview(template, image_path):
     """Генерация предпросмотра шаблона."""
     img = Image.open(image_path).convert("RGBA")
     draw = ImageDraw.Draw(img)
+    
+    # Добавляем затемнение
+    for overlay_area in template.get('overlay_areas', []):
+        x, y, w, h = overlay_area
+        overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        overlay_draw.rectangle([x, y, x+w, y+h], fill=(0, 0, 0, 128))
+        img = Image.alpha_composite(img, overlay)
+        draw = ImageDraw.Draw(img)
     
     for area in template.get('text_areas', []):
         font_path = area['font_family'] or "arial.ttf"
@@ -293,8 +277,11 @@ def callback_handler(call):
         bot.send_message(user_id, f"Шаблон '{template_name}' успешно сохранен!")
     elif action == 'cancel':
         template_path = os.path.join(TEMPLATES_DIR, str(user_id), f"{template_name}.json")
+        image_path = os.path.join(TEMPLATES_DIR, str(user_id), f"{template_name}.jpg")
         if os.path.exists(template_path):
             os.remove(template_path)
+        if os.path.exists(image_path):
+            os.remove(image_path)
         bot.answer_callback_query(call.id, "Шаблон удалён")
         bot.send_message(user_id, f"Шаблон '{template_name}' удален")
 
@@ -359,26 +346,56 @@ def generate_final_post(message):
     
     try:
         text = message.caption or "Текст поста"
+        lines = text.split('\n')  # Разделяем текст по строкам
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         img = Image.open(io.BytesIO(downloaded_file)).convert("RGBA")
         
         draw = ImageDraw.Draw(img)
+        text_areas = template.get('text_areas', [])
         
-        for area in template.get('text_areas', []):
+        # Добавляем затемнение
+        for overlay_area in template.get('overlay_areas', []):
+            x, y, w, h = overlay_area
+            overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            overlay_draw.rectangle([x, y, x+w, y+h], fill=(0, 0, 0, 128))
+            img = Image.alpha_composite(img, overlay)
+            draw = ImageDraw.Draw(img)
+        
+        # Сортируем зоны по Y-координате
+        text_areas.sort(key=lambda a: a['position'][1])
+        
+        # Распределяем текст по зонам
+        for i, area in enumerate(text_areas):
             x, y, w, h = area['position']
             text_color = tuple(area['color'])
             font_path = area.get('font_family', "arial.ttf")
             font_size = area.get('font_size', 24)
             
-            final_font = fit_text_in_area(text, font_path, font_size, w, h)
-            lines = wrap_text_multi(text, final_font, w, h)
+            # Добавляем затемнение, если нужно
+            if area.get('needs_overlay', False):
+                overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                overlay_draw.rectangle([x, y, x+w, y+h], fill=(0, 0, 0, 128))
+                img = Image.alpha_composite(img, overlay)
+                draw = ImageDraw.Draw(img)
             
-            total_height = sum(final_font.getbbox(line)[3] - final_font.getbbox(line)[1] for line in lines)
+            # Если это первая зона (например, "BREAKING"), используем первую строку
+            # Если вторая зона (основной текст), используем оставшиеся строки
+            if i == 0 and len(lines) > 1:
+                area_text = lines[0]
+            else:
+                area_text = ' '.join(lines[i:]) if i < len(lines) else ""
+            
+            final_font = fit_text_in_area(area_text, font_path, font_size, w, h)
+            area_lines = wrap_text_multi(area_text, final_font, w, h)
+            
+            total_height = sum(final_font.getbbox(line)[3] - final_font.getbbox(line)[1] for line in area_lines)
             current_y = y + (h - total_height) // 2
             
-            for line in lines:
-                bbox = final_font.getbbox(line)
+            for line in area_lines:
+                bbox = font.getbbox(line)
                 line_width = bbox[2] - bbox[0]
                 line_height = bbox[3] - bbox[1]
                 line_x = x + (w - line_width) // 2
