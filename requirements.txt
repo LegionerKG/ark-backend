@@ -1,4 +1,7 @@
-python-telegram-bot==13.7
-pillow
-opencv-python
-pytesseract
+Flask==2.3.2
+pyTelegramBotAPI==4.12.0
+Pillow==10.0.0
+opencv-python==4.9.0.80
+numpy==1.26.0
+pymongo==4.5.0
+gunicorn==20.1.0
